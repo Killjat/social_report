@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 import json
 import os
 import asyncio
@@ -145,7 +145,35 @@ def get_status():
     return jsonify(collection_status)
 
 
-@app.route('/api/trigger', methods=['GET', 'POST'])
+@app.route('/api/deep_search', methods=['GET', 'POST'])
+def deep_search_api():
+    """多平台发散搜索接口"""
+    if request.method == 'POST':
+        body = request.get_json() or {}
+    else:
+        body = request.args
+
+    keyword = body.get('keyword', '')
+    keyword_en = body.get('keyword_en', '')
+    fofa_query = body.get('fofa_query', '')
+    platforms = body.get('platforms', None)
+    limit = int(body.get('limit', 10))
+
+    if not keyword:
+        return jsonify({"error": "keyword is required"})
+
+    try:
+        from deep_searcher import deep_search
+        result = asyncio.run(deep_search(
+            keyword=keyword,
+            keyword_en=keyword_en or None,
+            fofa_query=fofa_query or None,
+            platforms=platforms or None,
+            limit=limit
+        ))
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)})
 def trigger_collection():
     """手动触发收集（立即在后台启动，不阻塞请求）"""
     if collection_status["running"]:

@@ -25,6 +25,23 @@ class DeepSearcher:
     def __init__(self):
         self.client = AsyncTikHub(api_key=TIKHUB_API_KEY)
 
+    def _is_relevant(self, item: Dict, keywords: List[str]) -> bool:
+        """检查一条结果是否与关键词相关，任意一个关键词命中即通过"""
+        text = ' '.join([
+            item.get('title', ''),
+            item.get('content', ''),
+            item.get('excerpt', ''),
+        ]).lower()
+        return any(kw.lower() in text for kw in keywords)
+
+    def _filter_relevant(self, items: List[Dict], keywords: List[str]) -> List[Dict]:
+        """过滤掉不相关的结果"""
+        filtered = [i for i in items if self._is_relevant(i, keywords)]
+        removed = len(items) - len(filtered)
+        if removed:
+            print(f"  过滤掉 {removed} 条不相关内容")
+        return filtered
+
     # ─── 微博 ────────────────────────────────────────────────
     async def search_weibo(self, keyword: str, limit: int = 10) -> List[Dict]:
         results = []
@@ -204,7 +221,7 @@ class DeepSearcher:
 
     # ─── FOFA ────────────────────────────────────────────────
     def search_fofa(self, query: str, limit: int = 10) -> List[Dict]:
-        """FOFA 资产搜索，query 支持 FOFA 语法，如 domain="pinduoduo.com" """
+        """FOFA 资产搜索 + 网页内容抓取"""
         results = []
         if not FOFA_EMAIL or not FOFA_KEY:
             print("[fofa] 未配置 FOFA_EMAIL / FOFA_KEY")
@@ -225,7 +242,8 @@ class DeepSearcher:
             data = resp.json()
             for row in data.get("results", []):
                 host, title, ip, domain, port, country, server, updated = (row + [""] * 8)[:8]
-                results.append({
+                url = f"http://{host}" if not host.startswith("http") else host
+                item = {
                     "platform": "fofa",
                     "keyword": query,
                     "id": host,
@@ -237,9 +255,26 @@ class DeepSearcher:
                     "country": country,
                     "server": server,
                     "updated": updated,
-                    "url": f"http://{host}" if not host.startswith("http") else host,
+                    "url": url,
                     "total_assets": data.get("size", 0),
-                })
+                    "content": ""
+                }
+                # 抓取网页正文
+                try:
+                    page = requests.get(url, timeout=8, headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; IntelBot/1.0)"
+                    }, verify=False)
+                    page.encoding = page.apparent_encoding
+                    html = page.text
+                    # 提取正文：去除 script/style，提取文本
+                    html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+                    html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL)
+                    text = re.sub(r'<[^>]+>', ' ', html)
+                    text = re.sub(r'\s+', ' ', text).strip()
+                    item["content"] = text[:500]
+                except Exception:
+                    pass  # 抓取失败不影响主流程
+                results.append(item)
         except Exception as e:
             print(f"[fofa] 搜索失败: {e}")
         return results
@@ -288,6 +323,15 @@ class DeepSearcher:
         if "fofa" in target:
             fq = fofa_query or f'"{keyword}"'
             results["fofa"] = self.search_fofa(fq, limit_per_platform)
+
+        # 相关性过滤：用关键词的各个词段做匹配
+        filter_keywords = [keyword] + (keyword_en.split() if keyword_en else [])
+        # 拆分中文关键词（按2字以上的词段）
+        cn_parts = re.findall(r'[\u4e00-\u9fff]{2,}', keyword)
+        filter_keywords += cn_parts
+
+        for platform in results:
+            results[platform] = self._filter_relevant(results[platform], filter_keywords)
 
         # 汇总统计
         total = sum(len(v) for v in results.values())
